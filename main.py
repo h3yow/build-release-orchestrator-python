@@ -1,12 +1,27 @@
+import os
+from pathlib import Path
+
 import uvicorn
 from fastapi import FastAPI
 
-app = FastAPI()
+from app.api import router
+from app.service import Orchestrator
+from app.store import Store
+
+DATA_DIR = Path(os.environ.get("ORCHESTRATOR_DATA_DIR", "./data"))
+
+store = Store(DATA_DIR)
+orchestrator = Orchestrator(store)
+
+app = FastAPI(title="build-release-orchestrator")
+app.state.store = store
+app.state.orchestrator = orchestrator
+app.include_router(router)
 
 
 @app.get("/")
 def read_root():
-    return {"Hello": "World"}
+    return {"service": "build-release-orchestrator", "status": "ok"}
 
 
 if __name__ == "__main__":
