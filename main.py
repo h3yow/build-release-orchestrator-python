@@ -16,6 +16,7 @@ from orchestrator.models import (
     OperationView,
     PromoteRequest,
     RegisterVersionRequest,
+    ReplaceUpgradeRequest,
     ReportBuildRequest,
     RollbackRequest,
 )
@@ -33,7 +34,7 @@ service = ReleaseService(_store)
 async def orchestrator_error_handler(request: Request, exc: OrchestratorError):
     # 409 表示与当前磁盘状态冲突（可安全重试），其余业务拒绝为 422/404
     conflict_codes = {"REVISION_CONFLICT", "ALREADY_ACTIVE", "DUPLICATE_REQUEST",
-                      "DUPLICATE_REQUEST_MISMATCH"}
+                      "DUPLICATE_REQUEST_MISMATCH", "UPGRADE_BLOCKED"}
     not_found_codes = {"ARTIFACT_NOT_FOUND", "VERSION_NOT_FOUND",
                        "ENV_NOT_FOUND", "OPERATION_NOT_FOUND"}
     if exc.code == "INJECTED_FAILURE":
@@ -75,6 +76,19 @@ def promote(req: PromoteRequest):
 def rollback(req: RollbackRequest):
     op = service.rollback(req)
     return _op_view(op)
+
+
+@app.post("/upgrades")
+def upgrade(req: ReplaceUpgradeRequest):
+    """分批替换升级：旧版本全量生效后逐环境换成新版本。"""
+    op = service.upgrade(req)
+    return _op_view(op)
+
+
+@app.get("/artifacts/{artifact_id}/upgrade-progress")
+def upgrade_progress(artifact_id: str, version: str):
+    """查询某版本的分批替换升级进度（只读，不改任何状态）。"""
+    return service.get_upgrade_progress(artifact_id, version).model_dump()
 
 
 @app.get("/envs")

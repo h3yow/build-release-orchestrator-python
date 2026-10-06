@@ -15,6 +15,7 @@ REVISION_CONFLICT = "REVISION_CONFLICT"  # 乐观锁冲突
 NOTHING_TO_ROLLBACK = "NOTHING_TO_ROLLBACK"
 VERSION_NOT_ACTIVE = "VERSION_NOT_ACTIVE"
 ALREADY_ACTIVE = "ALREADY_ACTIVE"
+UPGRADE_BLOCKED = "UPGRADE_BLOCKED"  # 分批替换升级当前状态无法继续（链路断裂/基线不符）
 DUPLICATE_REQUEST = "DUPLICATE_REQUEST"
 DUPLICATE_REQUEST_MISMATCH = "DUPLICATE_REQUEST_MISMATCH"
 INJECTED_FAILURE = "INJECTED_FAILURE"
@@ -73,6 +74,10 @@ class VersionNotActiveError(OrchestratorError):
 
 class AlreadyActiveError(OrchestratorError):
     code = ALREADY_ACTIVE
+
+
+class UpgradeBlockedError(OrchestratorError):
+    code = UPGRADE_BLOCKED
 
 
 class DuplicateRequestError(OrchestratorError):

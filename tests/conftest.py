@@ -65,6 +65,17 @@ def rollback(client, **kw):
     return client.post("/rollbacks", json=kw)
 
 
+def upgrade(client, **kw):
+    return client.post("/upgrades", json=kw)
+
+
+def upgrade_progress(client, artifact: str, version: str):
+    resp = client.get(f"/artifacts/{artifact}/upgrade-progress",
+                      params={"version": version})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
 def envs(client):
     return {e["env"]: (e["active_version"], e["revision"])
             for e in client.get("/envs").json()}

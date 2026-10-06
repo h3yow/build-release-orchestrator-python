@@ -42,6 +42,15 @@ class OperationType(enum.StrEnum):
     REGISTER = "REGISTER"
     PROMOTE = "PROMOTE"
     ROLLBACK = "ROLLBACK"
+    UPGRADE = "UPGRADE"  # 分批替换升级：旧版本全量生效后逐环境换新版本
+
+
+class UpgradePhase(enum.StrEnum):
+    """某版本分批替换升级的整体阶段。"""
+
+    NOT_STARTED = "NOT_STARTED"  # 还没开始：所有环境都还是统一旧版本
+    REPLACING = "REPLACING"      # 正在替换中：低环境已换新、高环境仍是旧版本
+    COMPLETED = "COMPLETED"      # 已全量完成：所有环境都是新版本
 
 
 class OperationStatus(enum.StrEnum):
@@ -278,10 +287,49 @@ class RollbackRequest(BaseModel):
     expected_revision: int | None = None
 
 
+class ReplaceUpgradeRequest(BaseModel):
+    """分批替换升级：要求旧版本已全量生效（或处于健康的替换中间窗口），
+    把新版本逐环境替换上去。"""
+
+    request_id: str = Field(min_length=1)
+    artifact_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)  # 要换上的新版本
+    # 点名目标环境：自动把剩余环境补齐到该环境；
+    # None 表示只推进下一个待替换环境（默认的“换一个、看一阵”节奏）
+    target_env: str | None = None
+    # 调用方观察到的目标环境预期 revision；None 表示不校验（仍在锁内执行）
+    expected_revision: int | None = None
+    # 测试用：在指定环境的写入环节注入失败，模拟升级中途失败
+    fail_at_env: str | None = None
+
+
 class EnvStateView(BaseModel):
     env: str
     active_version: str | None
     revision: int
+
+
+class UpgradeEnvProgress(BaseModel):
+    """分批替换升级中单个环境的进度。"""
+
+    env: str
+    active_version: str | None
+    revision: int
+    replaced: bool  # 该环境是否已换到目标新版本
+
+
+class UpgradeProgressView(BaseModel):
+    """某产物针对某版本的分批替换升级进度（纯查询，不改状态）。"""
+
+    artifact_id: str
+    version: str
+    phase: UpgradePhase
+    # 当前状态能否继续往下推进：False 表示该状态确实没法继续（链路断裂等）
+    continuable: bool
+    reason: str | None  # continuable=False 时的原因说明
+    baseline_version: str | None  # 被替换的旧版本（可识别时）
+    next_env: str | None  # 下一个待替换环境
+    envs: list[UpgradeEnvProgress]
 
 
 class OperationView(BaseModel):

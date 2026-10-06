@@ -1,8 +1,9 @@
 # 本地构建产物发布编排服务（Build Release Orchestrator）
 
 一个只依赖**本地文件与进程内资源**的 FastAPI 服务，用磁盘状态模拟“产物仓库”与
-“各环境目标状态”，提供产物版本在多环境之间的**晋级（promote）/ 回滚（rollback）**
-编排能力。并发的晋级、回滚与重复请求都能得到**一致且可解释**的结果：
+“各环境目标状态”，提供产物版本在多环境之间的**晋级（promote）/ 回滚（rollback）/
+分批替换升级（upgrade）**编排能力。并发的晋级、回滚、替换升级与重复请求都能得到
+**一致且可解释**的结果：
 前置条件不满足会被明确拒绝（原因可区分，绝不静默成功），冲突可安全重试，
 中途失败会回滚到操作前可见状态。
 
@@ -48,11 +49,13 @@ uv run pytest                            # 运行全部测试（实时打印请�
 
 ### 2.3 操作流水（Operation）
 
-每次晋级 / 回滚 / 注册都落一条以 `request_id` 为键的流水，只增语义地追加到
-`operations.jsonl`，字段包括：操作类型、目标、**调用方携带的 `expected_revision`**、
+每次晋级 / 回滚 / 替换升级 / 注册都落一条以 `request_id` 为键的流水
+（`op_type` 分别为 `PROMOTE` / `ROLLBACK` / `UPGRADE` / `REGISTER`），
+只增语义地追加到 `operations.jsonl`，字段包括：操作类型、目标、
+**调用方携带的 `expected_revision`**、
 `from_version/to_version`、`revision_before/revision_after`、
 `status(SUCCESS/FAILED)`、`error_code/error_message`、`attempts`，
-以及级联晋级的逐环境 `steps[]`（每步是否已被补偿 `rolled_back`）。
+以及级联写入的逐环境 `steps[]`（每步是否已被补偿 `rolled_back`）。
 
 ### 2.4 磁盘文件
 
@@ -111,7 +114,62 @@ data/
 
 ---
 
-## 5. 并发控制策略
+## 5. 分批替换升级（Upgrade）
+
+适用场景：**上一版已经铺满所有环境、线上都在跑**，这时要发新版本，想一个
+环境一个环境地换——先换 dev，观察一阵没问题再换 staging，最后才换 prod。
+`POST /upgrades` 把这条节奏做成一等能力。
+
+### 5.1 合法起点与中间混合窗口
+
+* **统一基线**：所有环境生效版本一致（旧版本全量生效）——可以开始替换。
+* **健康混合窗口**：存在切点 k，`dev..k-1` 已是新版本、`k..prod` 仍是同一
+  旧版本。这是**正常进行中的状态**，不是异常，随时可以接着往下推。
+* 其余形态（环境为空、剩余环境版本不一致、版本交错）视为**链路断裂**，
+  升级请求返回 `409 UPGRADE_BLOCKED`，进度查询也会明确标出
+  `continuable=false` 及原因——“正常过渡”与“确实没法继续”可区分。
+
+### 5.2 推进方式
+
+* `target_env` **缺省**：只推进**下一个**待替换环境（默认的“换一个、
+  看一阵”节奏）；
+* `target_env` **点名**更靠后的环境（如 `prod`）：自动把剩余环境一次性
+  补齐到该环境；
+* 已换到新版本的环境**绝不重复写入**（路径从切点起算，revision 不重复 +1）；
+* 全部环境都已是新版本时返回 `409 ALREADY_ACTIVE`。
+
+### 5.3 进度查询（只读）
+
+`GET /artifacts/{aid}/upgrade-progress?version=X` 返回：
+
+| 字段 | 说明 |
+| --- | --- |
+| `phase` | `NOT_STARTED`（还没开始）/ `REPLACING`（正在替换中）/ `COMPLETED`（已全量完成） |
+| `continuable` | 当前状态能否继续往下推；`false` 时 `reason` 给出原因 |
+| `baseline_version` | 被替换的旧版本（可识别时） |
+| `next_env` | 下一个待替换环境 |
+| `envs[]` | 每个环境的 `active_version / revision / replaced` |
+
+查询**不改任何状态**：不加写、不动 revision、不落操作流水。
+
+### 5.4 与晋级 / 回滚规则的兼容
+
+* **首次铺满仍走 `/promotions`**：环境全空或基线不统一时，替换升级会被
+  `UPGRADE_BLOCKED` 拒绝并提示改用级联晋级；原“从空环境一次铺满”的路径
+  完全不受影响。
+* **构建门槛一致**：只有 `build_status=SUCCESS` 的版本可替换升级。
+* **并发与幂等完全复用**：全局锁串行化 + `expected_revision` 乐观锁 +
+  `request_id` 幂等/续做，与晋级、回滚同一套语义；并发抢同一环境时
+  只有一方成功，另一方收到 `REVISION_CONFLICT` 或 `UPGRADE_BLOCKED`
+  （均为 409，可明确识别），拿最新状态可安全重试。
+* **中途失败补偿一致**：本次已换的环境按逆序回落到操作前可见状态，
+  之前就已生效的版本不受影响；同一 `request_id` 去掉失败源后重试即续做。
+* **回滚可穿插**：观察期内可对单个环境回滚；若因此把链路打断（如中间
+  环境被撤下），进度查询会报 `continuable=false`，修复后才可继续升级。
+
+---
+
+## 6. 并发控制策略
 
 采用“**全局串行化 + 每环境乐观条件（CAS）**”：
 
@@ -141,13 +199,14 @@ data/
 | 422 | `INVALID_STATE` | 流水线断裂、回滚目标无历史、非法构建状态等 |
 | 422 | `INVALID_TRANSITION` / `NOTHING_TO_ROLLBACK` | 非法迁移 / 无版本可回滚 |
 | 409 | `REVISION_CONFLICT` | 乐观锁冲突，可安全重试 |
+| 409 | `UPGRADE_BLOCKED` | 替换升级基线不符 / 链路断裂，当前状态无法继续 |
 | 409 | `ALREADY_ACTIVE` | 重复晋级 / 回滚到当前版本 |
 | 409 | `DUPLICATE_REQUEST(_MISMATCH)` | 幂等重放 / request_id 指纹冲突 |
 | 500 | `INJECTED_FAILURE` | 注入的中途失败（仅测试使用） |
 
 ---
 
-## 6. HTTP API
+## 7. HTTP API
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -156,6 +215,8 @@ data/
 | `GET`  | `/artifacts/{aid}/versions/{ver}` | 查询版本 |
 | `POST` | `/promotions` | 晋级（级联），body 见下 |
 | `POST` | `/rollbacks` | 回滚 / 撤下 |
+| `POST` | `/upgrades` | 分批替换升级（逐环境换新版本），body 见下 |
+| `GET`  | `/artifacts/{aid}/upgrade-progress?version=` | 查询替换升级进度（只读） |
 | `GET`  | `/envs` | 各环境当前 `active_version/revision` |
 | `GET`  | `/operations/{request_id}` | 查询单条操作流水（含 steps） |
 | `GET`  | `/operations?artifact_id=` | 查询操作流水列表 |
@@ -187,14 +248,63 @@ POST /rollbacks
 }
 ```
 
+分批替换升级请求示例（`target_env` 缺省 = 只推下一个环境）：
+
+```json
+POST /upgrades
+{
+  "request_id": "req-20261007-001",
+  "artifact_id": "checkout",
+  "version": "1.5.0",
+  "target_env": null,
+  "expected_revision": 3
+}
+```
+
+进度查询响应示例（混合窗口：dev 已换新、staging/prod 仍是旧版本）：
+
+```json
+GET /artifacts/checkout/upgrade-progress?version=1.5.0
+{
+  "artifact_id": "checkout",
+  "version": "1.5.0",
+  "phase": "REPLACING",
+  "continuable": true,
+  "reason": null,
+  "baseline_version": "1.4.2",
+  "next_env": "staging",
+  "envs": [
+    {"env": "dev", "active_version": "1.5.0", "revision": 4, "replaced": true},
+    {"env": "staging", "active_version": "1.4.2", "revision": 3, "replaced": false},
+    {"env": "prod", "active_version": "1.4.2", "revision": 3, "replaced": false}
+  ]
+}
+```
+
 ---
 
-## 7. 验证方法
+## 8. 验证方法
 
 ```bash
-uv run pytest                      # 全量测试（28 个用例）
+uv run pytest                      # 全量测试（39 个用例）
 uv run pytest -k concurrent        # 只看并发冲突用例
+uv run pytest -k upgrade           # 只看分批替换升级用例
 uv run pytest --log-cli-level=INFO # 打印每个用例的请求内容/前置条件/最终状态
+```
+
+手工验证分批替换升级主链路：
+
+```bash
+# 1. 旧版本 1.0 一次铺满
+curl -X POST localhost:8000/artifacts/versions -d '{"artifact_id":"app","version":"1.0"}' -H 'content-type: application/json'
+curl -X POST localhost:8000/promotions -d '{"request_id":"p1","artifact_id":"app","version":"1.0","target_env":"prod"}' -H 'content-type: application/json'
+# 2. 注册新版本 2.0，逐环境替换：先 dev，观察后再 staging、prod
+curl -X POST localhost:8000/artifacts/versions -d '{"artifact_id":"app","version":"2.0"}' -H 'content-type: application/json'
+curl -X POST localhost:8000/upgrades -d '{"request_id":"u1","artifact_id":"app","version":"2.0"}' -H 'content-type: application/json'
+# 3. 观察期查进度（只读）：phase=REPLACING, next_env=staging
+curl 'localhost:8000/artifacts/app/upgrade-progress?version=2.0'
+# 4. 点名 prod 自动补齐剩余环境
+curl -X POST localhost:8000/upgrades -d '{"request_id":"u2","artifact_id":"app","version":"2.0","target_env":"prod"}' -H 'content-type: application/json'
 ```
 
 测试分层：
@@ -202,6 +312,7 @@ uv run pytest --log-cli-level=INFO # 打印每个用例的请求内容/前置条
 | 文件 | 覆盖内容 |
 | --- | --- |
 | `tests/test_rules.py` | 级联晋级、逐步晋级、构建门槛、跳级/交错拒绝、重复晋级、各类 404、回滚到历史版本、撤下、回滚来源校验、回滚后续做补缺口 |
+| `tests/test_upgrade.py` | 分批替换升级主链路（逐环境替换）、中间混合窗口、混合状态点名补齐、进度查询只读、基线/断裂状态拒绝、并发抢同一环境、同一步重复提交、升级与回滚并发、中途失败补偿与续做 |
 | `tests/test_concurrency.py` | 同环境并发晋级只一方成功、冲突后刷新 revision 安全重试、互不相交环境并发都成功、晋级与回滚并发无覆盖 |
 | `tests/test_idempotency.py` | 成功请求重复提交幂等、回滚幂等、request_id 指纹冲突拒绝、失败重试 attempts 累加 |
 | `tests/test_failure_handling.py` | 中途失败逐级回落、末环失败回落、已生效旧版本不被破坏、失败后续做成功、前置拒绝无半成品、流水记录每次尝试 |
