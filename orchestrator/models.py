@@ -42,6 +42,15 @@ class OperationType(enum.StrEnum):
     REGISTER = "REGISTER"
     PROMOTE = "PROMOTE"
     ROLLBACK = "ROLLBACK"
+    UPGRADE = "UPGRADE"  # 分批替换升级：旧版本已全量，逐环境换成新版本
+
+
+class UpgradePhase(enum.StrEnum):
+    """某版本分批替换升级的整体阶段。"""
+
+    NOT_STARTED = "NOT_STARTED"    # 还没有任何环境换到该版本
+    IN_PROGRESS = "IN_PROGRESS"    # 低环境已换新、高环境仍是旧版本（混合窗口）
+    COMPLETED = "COMPLETED"        # 全部环境都已换到该版本
 
 
 class OperationStatus(enum.StrEnum):
@@ -278,10 +287,48 @@ class RollbackRequest(BaseModel):
     expected_revision: int | None = None
 
 
+class UpgradeRequest(BaseModel):
+    """分批替换升级：把 target_env 及其之前尚未换新的环境逐环境替换成 version。
+
+    与 PROMOTE 的区别：PROMOTE 面向"从空环境一次铺满/补缺口"，
+    要求本版本链路不被别的版本隔断；UPGRADE 面向"旧版本已全量生效，
+    逐环境替换"，允许低环境已是新版本、高环境仍是旧版本的混合窗口。
+    """
+
+    request_id: str = Field(min_length=1)
+    artifact_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    target_env: str = Field(min_length=1)
+    expected_revision: int | None = None
+    fail_at_env: str | None = None
+
+
 class EnvStateView(BaseModel):
     env: str
     active_version: str | None
     revision: int
+
+
+class EnvUpgradeView(BaseModel):
+    """分批升级进度查询中单个环境的视图。"""
+
+    env: str
+    active_version: str | None
+    revision: int
+    on_target_version: bool  # 当前生效版本是否已是被查询的目标版本
+
+
+class UpgradeStatusView(BaseModel):
+    """某产物某版本的分批替换升级进度（只读视图，查询不改状态）。"""
+
+    artifact_id: str
+    version: str
+    phase: str  # UpgradePhase 值
+    # 该版本在流水线中的生效位置是否构成合法前缀（可从当前状态继续往后推）
+    continuable: bool
+    # 不可继续时的原因（正常中间过渡为 None）
+    blocking_reason: str | None
+    envs: list[EnvUpgradeView] = Field(default_factory=list)
 
 
 class OperationView(BaseModel):

@@ -18,6 +18,7 @@ from orchestrator.models import (
     RegisterVersionRequest,
     ReportBuildRequest,
     RollbackRequest,
+    UpgradeRequest,
 )
 from orchestrator.service import ReleaseService
 from orchestrator.store import Store
@@ -75,6 +76,17 @@ def promote(req: PromoteRequest):
 def rollback(req: RollbackRequest):
     op = service.rollback(req)
     return _op_view(op)
+
+
+@app.post("/upgrades")
+def upgrade(req: UpgradeRequest):
+    op = service.upgrade(req)
+    return _op_view(op)
+
+
+@app.get("/artifacts/{artifact_id}/upgrades/{version}/status")
+def upgrade_status(artifact_id: str, version: str):
+    return service.get_upgrade_status(artifact_id, version).model_dump()
 
 
 @app.get("/envs")
